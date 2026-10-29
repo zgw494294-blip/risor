@@ -81,6 +81,17 @@ type VirtualMachine struct {
 	excStack     []exceptionFrame
 	excStackSize int
 
+	// Active generator state. These are set by driveGenerator while a
+	// generator body runs and restored to their previous values when it
+	// suspends or finishes, which allows multiple generator instances to be
+	// driven serially and interleaved on the same VM.
+	activeGen        *object.Generator
+	activeGenUserCtx context.Context
+	yieldedValue     object.Object
+	genBaseFP        int
+	genBaseSP        int
+	genBaseExc       int
+
 	// panicStack stores the stack trace captured during panic unwind.
 	// This is populated by defer functions before they restore the frame pointer,
 	// ensuring we preserve the full call stack when a panic occurs.
@@ -742,54 +753,25 @@ evalLoop:
 				continue
 			}
 		case op.ReturnValue:
-			activeFrame := vm.activeFrame
-
-			// Check for finally blocks that need to run before returning.
-			// We need to find exception frames for the current function frame
-			// that have finally blocks we haven't run yet.
-			if vm.excStackSize > 0 {
-				for i := vm.excStackSize - 1; i >= 0; i-- {
-					excFrame := &vm.excStack[i]
-					// Only consider handlers for the current function frame
-					if excFrame.fp != vm.fp || excFrame.code != vm.activeCode {
-						break
-					}
-					// If there's a finally block and we're not already in it
-					if excFrame.handler.FinallyStart > 0 && !excFrame.inFinally {
-						// Save the return value and jump to finally
-						returnValue := vm.pop()
-						excFrame.pendingReturn = returnValue
-						excFrame.inFinally = true
-						vm.ip = excFrame.handler.FinallyStart
-						// Don't return - continue execution in the finally block
-						continue evalLoop
-					}
-				}
+			// If there is an enclosing finally block that has not run yet,
+			// hand the return value to the INNERMOST such block. When its
+			// EndFinally runs, it chains to outer finally blocks inner to
+			// outer and only then completes the return.
+			if idx := vm.innermostFinallyIndex(vm.fp, vm.activeCode); idx >= 0 {
+				returnValue := vm.pop()
+				excFrame := &vm.excStack[idx]
+				excFrame.pendingReturn = returnValue
+				excFrame.inFinally = true
+				vm.ip = excFrame.handler.FinallyStart
+				continue evalLoop
 			}
 
-			// Call observer if present and configured to observe returns (before we lose the frame info)
-			if vm.observer != nil && vm.observerConfig.ObserveReturns {
-				funcName := ""
-				if activeFrame.fn != nil {
-					funcName = activeFrame.fn.Name()
-				}
-				event := ReturnEvent{
-					FunctionName: funcName,
-					Location:     vm.getCurrentLocation(),
-					FrameDepth:   vm.fp,
-				}
-				if !vm.observer.OnReturn(event) {
-					return fmt.Errorf("execution halted by observer")
-				}
-			}
-
-			returnAddr := activeFrame.returnAddr
-			returnSp := activeFrame.returnSp
-			returnFp := vm.fp - 1
-			vm.resumeFrame(returnFp, returnAddr, returnSp)
-			if returnAddr == StopSignal {
-				// If StopSignal is found as the return address, it means the
-				// current eval call should stop.
+			// Call observer if present and configured to observe returns,
+			// then pop the active frame.
+			if stop, retErr := vm.returnFromActiveFrame(); retErr != nil {
+				return retErr
+			} else if stop {
+				// StopSignal means the current eval call should stop.
 				return nil
 			}
 		case op.PopJumpForwardIfTrue:
@@ -1136,6 +1118,7 @@ evalLoop:
 				}
 			}
 
+			vm.ensureExcCapacity()
 			vm.excStack[vm.excStackSize] = exceptionFrame{
 				handler: handler,
 				code:    vm.activeCode,
@@ -1171,52 +1154,45 @@ evalLoop:
 			if vm.excStackSize > 0 {
 				excFrame := &vm.excStack[vm.excStackSize-1]
 
-				// Handle pending return (return statement was executed in try/catch)
+				// Handle pending return (a return statement in try/catch, or
+				// generator close). Chain through outer finally blocks inner
+				// to outer; only the outermost finally completes the return.
 				if excFrame.inFinally && excFrame.pendingReturn != nil {
-					// Complete the pending return
 					returnValue := excFrame.pendingReturn
 					excFrame.pendingReturn = nil
 					excFrame.inFinally = false
 					excFrame.inCatch = false
+					vm.excStack[vm.excStackSize-1] = exceptionFrame{}
 					vm.excStackSize-- // Pop this handler
 
-					// Push return value back onto stack and perform return
-					vm.push(returnValue)
-
-					activeFrame := vm.activeFrame
-
-					// Call observer if present and configured to observe returns
-					if vm.observer != nil && vm.observerConfig.ObserveReturns {
-						funcName := ""
-						if activeFrame.fn != nil {
-							funcName = activeFrame.fn.Name()
-						}
-						event := ReturnEvent{
-							FunctionName: funcName,
-							Location:     vm.getCurrentLocation(),
-							FrameDepth:   vm.fp,
-						}
-						if !vm.observer.OnReturn(event) {
-							return fmt.Errorf("execution halted by observer")
-						}
+					if outer := vm.innermostFinallyIndex(vm.fp, vm.activeCode); outer >= 0 {
+						outerFrame := &vm.excStack[outer]
+						outerFrame.pendingReturn = returnValue
+						outerFrame.inFinally = true
+						vm.ip = outerFrame.handler.FinallyStart
+						continue evalLoop
 					}
 
-					returnAddr := activeFrame.returnAddr
-					returnSp := activeFrame.returnSp
-					returnFp := vm.fp - 1
-					vm.resumeFrame(returnFp, returnAddr, returnSp)
-					if returnAddr == StopSignal {
+					// No more finally blocks for this frame: drop any
+					// intervening handlers (e.g. catch-only) and return.
+					vm.popHandlersForFrame(vm.fp, vm.activeCode)
+					vm.push(returnValue)
+					if stop, retErr := vm.returnFromActiveFrame(); retErr != nil {
+						return retErr
+					} else if stop {
 						return nil
 					}
 					continue evalLoop
 				}
 
-				// Handle pending error (exception was thrown, no catch, finally ran)
+				// Handle pending error (exception thrown, no catch, finally
+				// ran). Pop this handler and re-dispatch: outer finally-only
+				// handlers chain naturally through handleException.
 				if excFrame.inFinally && excFrame.pendingError != nil {
-					// Re-raise the pending error
 					pendingErr := excFrame.pendingError
 					excFrame.pendingError = nil
 					excFrame.inFinally = false
+					vm.excStack[vm.excStackSize-1] = exceptionFrame{}
 					vm.excStackSize-- // Pop this handler
 
 					// Try to find another handler
@@ -1226,13 +1202,79 @@ evalLoop:
 					continue evalLoop
 				}
 
-				// Normal finally completion (from try or catch falling through)
+				// Normal finally completion (from try or catch falling
+				// through). PopExcept already removed handlers for the
+				// ordinary non-exception path, so the top handler here is
+				// only popped when it belongs to this catch/finally flow.
 				if excFrame.inFinally || excFrame.inCatch {
 					excFrame.inFinally = false
 					excFrame.inCatch = false
+					vm.excStack[vm.excStackSize-1] = exceptionFrame{}
 					vm.excStackSize--
 				}
 			}
+		case op.Yield:
+			// Suspend the active generator with TOS as the yielded value.
+			// On resume, the yield expression evaluates to nil.
+			if vm.activeGen == nil {
+				return vm.evalError("yield outside of a generator")
+			}
+			yielded := vm.pop()
+			vm.suspendYield(vm.activeGen, yielded, object.Nil)
+			return errYielded
+		case op.YieldFrom: {
+			// Delegate item-by-item to an enumerable or another generator.
+			// The instruction is re-entered on resume: if the suspension
+			// already records a delegate at this instruction site, pull the
+			// next item from it instead of popping a new operand.
+			site := vm.ip - 1
+			if vm.activeGen == nil {
+				return vm.evalError("yield* outside of a generator")
+			}
+			susp, _ := vm.activeGen.Suspension().(*genSusp)
+			if susp == nil {
+				susp = &genSusp{}
+				vm.activeGen.SetSuspension(susp)
+			}
+			var delegate genDelegate
+			if susp.delegate != nil && susp.delegateSite == site {
+				delegate = susp.delegate
+			} else {
+				iterable := vm.pop()
+				d, derr := vm.makeDelegate(iterable, vm.activeGenUserCtx)
+				if derr != nil {
+					if herr := vm.tryHandleError(derr); herr != nil {
+						return herr
+					}
+					continue
+				}
+				susp.delegate = d
+				susp.delegateSite = site
+				delegate = d
+			}
+			for {
+				value, done, nerr := delegate.next(ctx)
+				if nerr != nil {
+					// Errors raised by the delegate are thrown at this site,
+					// where the generator's try/catch rules apply normally.
+					susp.delegate = nil
+					if herr := vm.tryHandleError(nerr); herr != nil {
+						return herr
+					}
+					break
+				}
+				if done {
+					susp.delegate = nil
+					// The value of a yield* expression is unspecified.
+					vm.push(object.Nil)
+					break
+				}
+				// Re-enter this same instruction when resumed.
+				vm.ip = site
+				vm.suspendYield(vm.activeGen, value, nil)
+				return errYielded
+			}
+		}
 		default:
 			if herr := vm.tryHandleError(vm.evalError("unknown opcode: %d", opcode)); herr != nil {
 				return herr
@@ -1333,8 +1375,18 @@ func (vm *VirtualMachine) callFunction(
 	fn *object.Closure,
 	args []object.Object,
 ) (result object.Object, resultErr error) {
+	// Calling a generator function creates a generator object without
+	// executing the body. The returned generator is driven through its own
+	// next()/close() methods.
+	if fn.IsGenerator() {
+		gen, err := vm.makeGenerator(fn, args)
+		if err != nil {
+			return nil, err
+		}
+		return gen, nil
+	}
+
 	// Check that the argument count is appropriate
-	paramsCount := fn.ParameterCount()
 	argc := len(args)
 
 	if argc > MaxArgs {
@@ -1363,11 +1415,49 @@ func (vm *VirtualMachine) callFunction(
 		vm.resumeFrame(baseFP, baseIP, baseSP)
 	}()
 
-	// Assemble frame local variables in vm.tmp. The local variable order is:
-	// 1. Function parameters
-	// 2. Rest parameter (if any)
-	// 3. Function name (if the function is named)
+	// Assemble frame local variables (parameters, rest param, function name).
+	localValues, localCount := vm.assembleLocals(fn, args)
 
+	// Activate a frame for the function call
+	if _, err := vm.activateFunction(vm.fp+1, 0, fn, localValues[:localCount]); err != nil {
+		return nil, err
+	}
+
+	// Call observer if present and configured to observe calls
+	if vm.observer != nil && vm.observerConfig.ObserveCalls {
+		event := CallEvent{
+			FunctionName: fn.Name(),
+			ArgCount:     len(args),
+			Location:     vm.getCurrentLocation(),
+			FrameDepth:   vm.fp + 1,
+		}
+		if !vm.observer.OnCall(event) {
+			return nil, fmt.Errorf("execution halted by observer")
+		}
+	}
+
+	// Setting StopSignal as the return address will cause the eval function to
+	// stop execution when it reaches the end of the active code.
+	vm.activeFrame.returnAddr = StopSignal
+
+	// Evaluate the function code then return the result from TOS
+	if err := vm.eval(ctx); err != nil {
+		return nil, err
+	}
+	return vm.pop(), nil
+}
+
+// assembleLocals lays out function arguments into vm.tmp slots. The local
+// variable order is:
+//  1. Function parameters (with defaults applied)
+//  2. Rest parameter (if any)
+//  3. Function name (if the function is named)
+//
+// It returns the tmp slice and the number of initialized slots. The caller
+// must copy the values into frame locals before tmp is reused.
+func (vm *VirtualMachine) assembleLocals(fn *object.Closure, args []object.Object) ([]object.Object, int) {
+	paramsCount := fn.ParameterCount()
+	argc := len(args)
 	localCount := paramsCount
 	hasRestParam := fn.HasRestParam()
 
@@ -1396,7 +1486,6 @@ func (vm *VirtualMachine) callFunction(
 		vm.tmp[paramsCount] = object.NewList(restArgs)
 		localCount = paramsCount + 1
 	} else {
-		// No rest param - original behavior
 		copy(vm.tmp[:argc], args)
 		if argc < paramsCount {
 			for i := argc; i < fn.DefaultCount(); i++ {
@@ -1406,40 +1495,11 @@ func (vm *VirtualMachine) callFunction(
 		localCount = paramsCount
 	}
 
-	code := fn.Code()
-	if code.IsNamed() {
+	if fn.Code().IsNamed() {
 		vm.tmp[localCount] = fn
 		localCount++
 	}
-	argc = localCount
-
-	// Activate a frame for the function call
-	if _, err := vm.activateFunction(vm.fp+1, 0, fn, vm.tmp[:argc]); err != nil {
-		return nil, err
-	}
-
-	// Call observer if present and configured to observe calls
-	if vm.observer != nil && vm.observerConfig.ObserveCalls {
-		event := CallEvent{
-			FunctionName: fn.Name(),
-			ArgCount:     len(args),
-			Location:     vm.getCurrentLocation(),
-			FrameDepth:   vm.fp + 1,
-		}
-		if !vm.observer.OnCall(event) {
-			return nil, fmt.Errorf("execution halted by observer")
-		}
-	}
-
-	// Setting StopSignal as the return address will cause the eval function to
-	// stop execution when it reaches the end of the active code.
-	vm.activeFrame.returnAddr = StopSignal
-
-	// Evaluate the function code then return the result from TOS
-	if err := vm.eval(ctx); err != nil {
-		return nil, err
-	}
-	return vm.pop(), nil
+	return vm.tmp[:], localCount
 }
 
 // Call a callable object with the given arguments. Returns an error if the
@@ -1775,16 +1835,27 @@ func (vm *VirtualMachine) handleException(errObj *object.Error) error {
 
 		handler := excFrame.handler
 
-		// If we have a catch block and we're not already in it, enter catch
-		// When catch completes normally, exception is considered handled
+		// An exception thrown from inside a finally body supersedes any
+		// pending error and abandons this handler; propagate to the next
+		// outer handler.
+		if excFrame.inFinally {
+			vm.excStack[vm.excStackSize-1] = exceptionFrame{}
+			vm.excStackSize--
+			continue
+		}
+
+		// If we have a catch block and we're not already in it, enter catch.
+		// The established Risor order (also relied on by generators) is
+		// catch first; the catch block falls through into finally.
 		if handler.CatchStart > 0 && handler.CatchStart != handler.FinallyStart && !excFrame.inCatch {
-			// If there's a finally block, keep the frame on the stack so that
-			// return statements in catch can trigger the finally block.
-			// EndFinally will pop the frame after finally completes.
+			// If there's a finally block, keep the frame on the stack so
+			// that return statements in catch trigger the finally block.
+			// EndFinally pops the handler after the finally completes.
 			if handler.FinallyStart > 0 {
 				excFrame.inCatch = true
 			} else {
-				// No finally block - pop the handler since catch will fully handle it
+				// No finally block - pop the handler since catch fully handles it
+				vm.excStack[vm.excStackSize-1] = exceptionFrame{}
 				vm.excStackSize--
 			}
 
@@ -1797,7 +1868,6 @@ func (vm *VirtualMachine) handleException(errObj *object.Error) error {
 		// Exception thrown while in catch block - go to finally if available
 		// (The exception from catch replaces the original exception)
 		if excFrame.inCatch && handler.FinallyStart > 0 && !excFrame.inFinally {
-			// Store the new error for re-raising after finally
 			excFrame.pendingError = errObj
 			excFrame.inCatch = false
 			excFrame.inFinally = true
@@ -1805,18 +1875,17 @@ func (vm *VirtualMachine) handleException(errObj *object.Error) error {
 			return nil
 		}
 
-		// No catch block (or already in catch), but we have finally - run finally with pending error
+		// No catch block (or already in catch), but we have finally - run
+		// finally with the pending error.
 		if handler.FinallyStart > 0 && !excFrame.inFinally {
-			// Store the pending error for re-raising after finally
 			excFrame.pendingError = errObj
 			excFrame.inFinally = true
-
-			// Go to finally
 			vm.ip = handler.FinallyStart
 			return nil
 		}
 
 		// No handler available, pop and try next
+		vm.excStack[vm.excStackSize-1] = exceptionFrame{}
 		vm.excStackSize--
 	}
 

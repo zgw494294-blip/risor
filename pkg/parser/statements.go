@@ -449,3 +449,43 @@ func (p *Parser) parseThrow() ast.Node {
 
 	return &ast.Throw{Throw: throwPos, Value: value}
 }
+
+// parseYield parses a yield expression: "yield", "yield expr", or
+// "yield* expr". Yield is only valid inside generator functions; that is
+// enforced by the compiler.
+func (p *Parser) parseYield() (ast.Node, bool) {
+	yieldPos := p.curToken.StartPosition
+	delegate := false
+	var starPos token.Position
+	if p.peekTokenIs(token.ASTERISK) {
+		p.nextToken() // move to "*"
+		delegate = true
+		starPos = p.curToken.StartPosition
+	}
+	// A bare yield (no operand) yields nil. This also handles "yield*" at
+	// the end of a block, which is a parse error below.
+	if p.peekTokenIs(token.SEMICOLON) ||
+		p.peekTokenIs(token.NEWLINE) ||
+		p.peekTokenIs(token.RBRACE) ||
+		p.peekTokenIs(token.EOF) ||
+		p.peekTokenIs(token.COMMA) ||
+		p.peekTokenIs(token.RPAREN) ||
+		p.peekTokenIs(token.RBRACKET) {
+		if delegate {
+			p.setTokenError(p.curToken, "yield* requires an expression")
+			return nil, false
+		}
+		return &ast.Yield{Yield: yieldPos}, true
+	}
+	p.nextToken() // move to the operand
+	value := p.parseExpression(LOWEST)
+	if value == nil {
+		return nil, false
+	}
+	return &ast.Yield{
+		Yield:    yieldPos,
+		Star:     starPos,
+		Delegate: delegate,
+		Value:    value,
+	}, true
+}

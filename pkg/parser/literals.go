@@ -381,6 +381,16 @@ func (p *Parser) parseMapItem() *ast.MapItem {
 
 func (p *Parser) parseFunc() (ast.Node, bool) {
 	funcPos := p.curToken.StartPosition
+	// Generator functions are declared as "function* name() {}" or
+	// "function*() {}". The star is optional and may be separated from the
+	// "function" keyword by whitespace.
+	isGenerator := false
+	var starPos token.Position
+	if p.peekTokenIs(token.ASTERISK) {
+		p.nextToken()
+		isGenerator = true
+		starPos = p.curToken.StartPosition
+	}
 	var ident *ast.Ident
 	if p.peekTokenIs(token.IDENT) { // Read optional function name
 		p.nextToken()
@@ -404,6 +414,8 @@ func (p *Parser) parseFunc() (ast.Node, bool) {
 	}
 	return &ast.Func{
 		Func:      funcPos,
+		Generator: isGenerator,
+		Star:      starPos,
 		Name:      ident,
 		Lparen:    lparen,
 		Params:    params,

@@ -7,12 +7,13 @@ import (
 )
 
 type Function struct {
-	id         string
-	name       string
-	parameters []string
-	defaults   []any
-	restParam  string // Name of rest parameter (empty if none)
-	code       *Code
+	id          string
+	name        string
+	parameters  []string
+	defaults    []any
+	restParam   string // Name of rest parameter (empty if none)
+	code        *Code
+	isGenerator bool // True for generator functions (function*)
 }
 
 func (f *Function) ID() string {
@@ -102,22 +103,24 @@ func (f *Function) String() string {
 }
 
 type FunctionOpts struct {
-	ID         string
-	Name       string
-	Parameters []string
-	Defaults   []any
-	RestParam  string // Name of rest parameter (empty if none)
-	Code       *Code
+	ID          string
+	Name        string
+	Parameters  []string
+	Defaults    []any
+	RestParam   string // Name of rest parameter (empty if none)
+	Code        *Code
+	IsGenerator bool
 }
 
 func NewFunction(opts FunctionOpts) *Function {
 	return &Function{
-		id:         opts.ID,
-		name:       opts.Name,
-		parameters: opts.Parameters,
-		defaults:   opts.Defaults,
-		restParam:  opts.RestParam,
-		code:       opts.Code,
+		id:          opts.ID,
+		name:        opts.Name,
+		parameters:  opts.Parameters,
+		defaults:    opts.Defaults,
+		restParam:   opts.RestParam,
+		code:        opts.Code,
+		isGenerator: opts.IsGenerator,
 	}
 }
 
@@ -127,4 +130,8 @@ func (f *Function) RestParam() string {
 
 func (f *Function) HasRestParam() bool {
 	return f.restParam != ""
+}
+
+func (f *Function) IsGenerator() bool {
+	return f.isGenerator
 }

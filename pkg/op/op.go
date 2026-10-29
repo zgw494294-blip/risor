@@ -92,6 +92,10 @@ const (
 	PopExcept  Code = 141 // Pop exception handler (normal try completion)
 	Throw      Code = 142 // Throw TOS as exception
 	EndFinally Code = 143 // End finally block, re-raise pending exception if any
+
+	// Generators
+	Yield     Code = 150 // Suspend generator with TOS as the yielded value
+	YieldFrom Code = 151 // Delegate iteration to TOS enumerable/generator
 )
 
 // BinaryOpType describes a type of binary operation, as in an operation that
@@ -250,6 +254,8 @@ func init() {
 		{PopExcept, "POP_EXCEPT", 0},
 		{Throw, "THROW", 0},
 		{EndFinally, "END_FINALLY", 0},
+		{Yield, "YIELD", 0},
+		{YieldFrom, "YIELD_FROM", 0},
 	}
 	for _, o := range ops {
 		infos[o.op] = Info{

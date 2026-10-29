@@ -123,6 +123,7 @@ const (
 	CATCH           Type = "CATCH"
 	FINALLY         Type = "FINALLY"
 	THROW           Type = "THROW"
+	YIELD           Type = "YIELD"
 )
 
 // Reserved keywords
@@ -145,6 +146,7 @@ var keywords = map[string]Type{
 	"try":      TRY,
 	"catch":    CATCH,
 	"finally":  FINALLY,
+	"yield":    YIELD,
 }
 
 // LookupIdentifier used to determinate whether identifier is keyword nor not

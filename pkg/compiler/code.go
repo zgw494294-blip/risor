@@ -23,6 +23,7 @@ type Code struct {
 	id           string
 	name         string
 	isNamed      bool
+	isGenerator  bool
 	parent       *Code
 	children     []*Code
 	symbols      *SymbolTable
@@ -46,6 +47,10 @@ type Code struct {
 
 	// Exception handlers for try/catch/finally
 	exceptionHandlers []*ExceptionHandler
+
+	// finallyDepth tracks compilation inside finally blocks for this code.
+	// Used only during compilation to reject yield in finally blocks.
+	finallyDepth int
 
 	// envKeys stores the names of globals from the compile-time env.
 	// Only set on root code. Used for validation at run time.
@@ -111,6 +116,12 @@ func (c *Code) addName(name string) uint16 {
 
 func (c *Code) IsNamed() bool {
 	return c.isNamed
+}
+
+// IsGenerator returns true if this code belongs to a generator function
+// (declared with "function*").
+func (c *Code) IsGenerator() bool {
+	return c.isGenerator
 }
 
 func (c *Code) FunctionID() string {
@@ -356,12 +367,13 @@ func (c *Code) toBytecodeWithMap(codeMap map[*Code]*bytecode.Code) *bytecode.Cod
 				panic("function code not found in codeMap - function's code should be a child")
 			}
 			bcFn := bytecode.NewFunction(bytecode.FunctionParams{
-				ID:         fn.id,
-				Name:       fn.name,
-				Parameters: fn.parameters,
-				Defaults:   fn.defaults,
-				RestParam:  fn.restParam,
-				Code:       fnCode,
+				ID:          fn.id,
+				Name:        fn.name,
+				Parameters:  fn.parameters,
+				Defaults:    fn.defaults,
+				RestParam:   fn.restParam,
+				Code:        fnCode,
+				IsGenerator: fn.isGenerator,
 			})
 			constants[i] = bcFn
 		} else {

@@ -204,6 +204,8 @@ func (x *ArrayDestructureParam) String() string {
 // Func is an expression node that holds a function literal.
 type Func struct {
 	Func      token.Position  // position of "function" keyword
+	Generator bool            // true if declared as "function*" (generator function)
+	Star      token.Position  // position of "*" for generator functions (zero if absent)
 	Name      *Ident          // function name; nil for anonymous functions
 	Lparen    token.Position  // position of "("
 	Params    []FuncParam     // parameter names or destructuring patterns
@@ -232,6 +234,9 @@ func (x *Func) String() string {
 		params = append(params, p.String())
 	}
 	out.WriteString("function")
+	if x.Generator {
+		out.WriteString("*")
+	}
 	if x.Name != nil {
 		out.WriteString(" ")
 		out.WriteString(x.Name.Name)

@@ -100,6 +100,10 @@ func Walk(v Visitor, node Node) {
 		if n.Value != nil {
 			Walk(v, n.Value)
 		}
+	case *Yield:
+		if n.Value != nil {
+			Walk(v, n.Value)
+		}
 	case *Postfix:
 		if n.X != nil {
 			Walk(v, n.X)
@@ -387,6 +391,10 @@ func Preorder(root Node) iter.Seq[Node] {
 					return false
 				}
 			case *Throw:
+				if node.Value != nil && !visit(node.Value) {
+					return false
+				}
+			case *Yield:
 				if node.Value != nil && !visit(node.Value) {
 					return false
 				}

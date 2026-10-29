@@ -163,6 +163,13 @@ func (f *Closure) HasRestParam() bool {
 	return f.fn.HasRestParam()
 }
 
+// IsGenerator returns true if the closure wraps a generator function
+// (declared with "function*"). Calling such a closure creates a generator
+// object rather than executing the body.
+func (f *Closure) IsGenerator() bool {
+	return f.fn.IsGenerator()
+}
+
 // LocalsCount returns the number of local variables.
 func (f *Closure) LocalsCount() int {
 	return f.fn.LocalCount()

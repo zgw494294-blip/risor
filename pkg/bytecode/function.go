@@ -16,17 +16,19 @@ type Function struct {
 	defaults      []any
 	restParam     string // Name of rest parameter (empty if none)
 	code          *Code
-	requiredCount int // Precomputed: len(parameters) - len(defaults)
+	requiredCount int  // Precomputed: len(parameters) - len(defaults)
+	isGenerator   bool // True for generator functions (function*)
 }
 
 // FunctionParams contains parameters for creating a new Function.
 type FunctionParams struct {
-	ID         string
-	Name       string
-	Parameters []string
-	Defaults   []any
-	RestParam  string
-	Code       *Code
+	ID          string
+	Name        string
+	Parameters  []string
+	Defaults    []any
+	RestParam   string
+	Code        *Code
+	IsGenerator bool
 }
 
 // NewFunction creates a new immutable Function from the given parameters.
@@ -52,6 +54,7 @@ func NewFunction(params FunctionParams) *Function {
 		restParam:     params.RestParam,
 		code:          params.Code,
 		requiredCount: len(parameters) - defaultsWithValue,
+		isGenerator:   params.IsGenerator,
 	}
 }
 
@@ -115,6 +118,13 @@ func (f *Function) HasRestParam() bool {
 	return f.restParam != ""
 }
 
+// IsGenerator returns true if the function is a generator function
+// (declared with "function*"). Calling such a function creates a generator
+// object without executing the body.
+func (f *Function) IsGenerator() bool {
+	return f.isGenerator
+}
+
 // String returns a string representation of the function.
 func (f *Function) String() string {
 	var out bytes.Buffer
@@ -128,6 +138,9 @@ func (f *Function) String() string {
 		parameters = append(parameters, name)
 	}
 	out.WriteString("func")
+	if f.isGenerator {
+		out.WriteString("*")
+	}
 	if f.name != "" {
 		out.WriteString(" " + f.name)
 	}

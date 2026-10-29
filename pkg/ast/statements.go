@@ -410,3 +410,40 @@ func (x *Throw) String() string {
 	}
 	return out.String()
 }
+
+// Yield represents a yield expression inside a generator function.
+// Value is nil for a bare "yield" (which yields nil). Delegate is true for
+// "yield* expr", which delegates each item of the value to the consumer.
+type Yield struct {
+	Yield    token.Position // position of "yield" keyword
+	Star     token.Position // position of "*" in yield*; zero if absent
+	Delegate bool           // true for yield*
+	Value    Expr           // value to yield / delegate; nil for bare yield
+}
+
+func (x *Yield) exprNode() {} // also usable as an expression statement
+
+func (x *Yield) Pos() token.Position { return x.Yield }
+
+func (x *Yield) End() token.Position {
+	if x.Value != nil {
+		return x.Value.End()
+	}
+	if x.Delegate {
+		return x.Star.Advance(1)
+	}
+	return x.Yield.Advance(5) // len("yield")
+}
+
+func (x *Yield) String() string {
+	var out bytes.Buffer
+	out.WriteString("yield")
+	if x.Delegate {
+		out.WriteString("*")
+	}
+	if x.Value != nil {
+		out.WriteString(" ")
+		out.WriteString(x.Value.String())
+	}
+	return out.String()
+}

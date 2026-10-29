@@ -412,6 +412,10 @@ func (c *Compiler) compile(node ast.Node) error {
 		if err := c.compileThrow(node); err != nil {
 			return err
 		}
+	case *ast.Yield:
+		if err := c.compileYield(node); err != nil {
+			return err
+		}
 	case *ast.BadExpr:
 		return c.formatError("syntax error in expression", node.Pos())
 	case *ast.BadStmt:
@@ -1479,6 +1483,7 @@ func (c *Compiler) compileFunc(node *ast.Func) error {
 	functionID := fmt.Sprintf("%d", c.funcIndex)
 	bodySource := c.extractFunctionBodySource(node)
 	code := c.current.newChild(functionName, bodySource, functionID)
+	code.isGenerator = node.Generator
 
 	// Setting current here means subsequent calls to compile will add to this
 	// code object instead of the parent.
@@ -1630,12 +1635,13 @@ func (c *Compiler) compileFunc(node *ast.Func) error {
 
 	// Create the function that contains the compiled code
 	fn := NewFunction(FunctionOpts{
-		ID:         functionID,
-		Name:       functionName,
-		Parameters: params,
-		Defaults:   defaults,
-		RestParam:  restParamName,
-		Code:       code,
+		ID:          functionID,
+		Name:        functionName,
+		Parameters:  params,
+		Defaults:    defaults,
+		RestParam:   restParamName,
+		Code:        code,
+		IsGenerator: node.Generator,
 	})
 
 	// Emit the code to load the function object onto the stack. If there are
@@ -2376,8 +2382,11 @@ func (c *Compiler) compileTry(node *ast.Try) error {
 	// Compile finally block if present
 	finallyBlock := node.FinallyBlock
 	if finallyBlock != nil {
-		// Compile the finally block body
-		if err := c.compileBlock(finallyBlock); err != nil {
+		// Disallow yield within finally blocks for synchronous generators.
+		c.current.finallyDepth++
+		err := c.compileBlock(finallyBlock)
+		c.current.finallyDepth--
+		if err != nil {
 			return err
 		}
 
@@ -2450,5 +2459,32 @@ func (c *Compiler) compileThrow(node *ast.Throw) error {
 
 	// Emit Throw opcode
 	c.emit(op.Throw)
+	return nil
+}
+
+func (c *Compiler) compileYield(node *ast.Yield) error {
+	if !c.current.isGenerator {
+		return c.formatError("yield is only allowed inside generator functions (function*)", node.Pos())
+	}
+	if c.current.finallyDepth > 0 {
+		return c.formatError("yield is not allowed in a finally block", node.Pos())
+	}
+	if node.Delegate {
+		// yield* iterable: the VM pushes nil when the delegate is exhausted.
+		if err := c.compile(node.Value); err != nil {
+			return err
+		}
+		c.emit(op.YieldFrom)
+		return nil
+	}
+	if node.Value != nil {
+		if err := c.compile(node.Value); err != nil {
+			return err
+		}
+	} else {
+		// Bare yield produces nil.
+		c.emit(op.Nil)
+	}
+	c.emit(op.Yield)
 	return nil
 }

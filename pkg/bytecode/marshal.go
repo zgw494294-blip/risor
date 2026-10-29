@@ -57,12 +57,13 @@ type functionConstantDef struct {
 }
 
 type functionDef struct {
-	ID         string            `json:"id"`
-	Name       string            `json:"name"`
-	Parameters []string          `json:"parameters"`
-	Defaults   []json.RawMessage `json:"defaults"`
-	RestParam  string            `json:"rest_param,omitempty"`
-	CodeIndex  int               `json:"code_index"` // Index into codes array
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	Parameters  []string          `json:"parameters"`
+	Defaults    []json.RawMessage `json:"defaults"`
+	RestParam   string            `json:"rest_param,omitempty"`
+	IsGenerator bool              `json:"is_generator,omitempty"`
+	CodeIndex   int               `json:"code_index"` // Index into codes array
 }
 
 type locationDef struct {
@@ -315,12 +316,13 @@ func marshalConstant(c any, codeIndexMap map[*Code]int) (json.RawMessage, error)
 		return json.Marshal(functionConstantDef{
 			Type: "function",
 			Value: functionDef{
-				ID:         v.ID(),
-				Name:       v.Name(),
-				Parameters: params,
-				Defaults:   defaults,
-				RestParam:  v.RestParam(),
-				CodeIndex:  codeIndex,
+				ID:          v.ID(),
+				Name:        v.Name(),
+				Parameters:  params,
+				Defaults:    defaults,
+				RestParam:   v.RestParam(),
+				IsGenerator: v.IsGenerator(),
+				CodeIndex:   codeIndex,
 			},
 		})
 	default:
@@ -404,12 +406,13 @@ func unmarshalConstantImmutable(data json.RawMessage, codes []*Code) (any, error
 			fnCode = codes[d.Value.CodeIndex]
 		}
 		fn := NewFunction(FunctionParams{
-			ID:         d.Value.ID,
-			Name:       d.Value.Name,
-			Parameters: d.Value.Parameters,
-			Defaults:   defaults,
-			RestParam:  d.Value.RestParam,
-			Code:       fnCode,
+			ID:          d.Value.ID,
+			Name:        d.Value.Name,
+			Parameters:  d.Value.Parameters,
+			Defaults:    defaults,
+			RestParam:   d.Value.RestParam,
+			IsGenerator: d.Value.IsGenerator,
+			Code:        fnCode,
 		})
 		return fn, nil
 	default:
